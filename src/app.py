@@ -5,9 +5,13 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
 
@@ -77,6 +81,76 @@ activities = {
     }
 }
 
+# Secret key for JWT
+SECRET_KEY = "your_secret_key"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# Password hashing context
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+# In-memory user database
+users_db = {
+    "admin@mergington.edu": {
+        "username": "admin",
+        "full_name": "Admin User",
+        "email": "admin@mergington.edu",
+        "hashed_password": get_password_hash("adminpassword"),
+        "disabled": False,
+        "role": "admin"
+    },
+    "user@mergington.edu": {
+        "username": "user",
+        "full_name": "Regular User",
+        "email": "user@mergington.edu",
+        "hashed_password": get_password_hash("userpassword"),
+        "disabled": False,
+        "role": "user"
+    }
+}
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+
+
+@app.post("/token")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = users_db.get(form_data.username)
+    if not user or not verify_password(form_data.password, user["hashed_password"]):
+        raise HTTPException(status_code=400, detail="Invalid credentials")
+    access_token = create_access_token(data={"sub": user["username"]})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/users/me")
+def read_users_me(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user = users_db.get(username)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return user
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
 
 @app.get("/")
 def root():
@@ -89,7 +163,10 @@ def get_activities():
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, token: str = Depends(oauth2_scheme)):
+    user = read_users_me(token)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized")
     """Sign up a student for an activity"""
     # Validate activity exists
     if activity_name not in activities:
@@ -111,7 +188,10 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, token: str = Depends(oauth2_scheme)):
+    user = read_users_me(token)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized")
     """Unregister a student from an activity"""
     # Validate activity exists
     if activity_name not in activities:
